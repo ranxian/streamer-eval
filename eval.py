@@ -20,12 +20,6 @@ from matplotlib.font_manager import FontProperties
 from matplotlib.ticker import LinearLocator
 
 
-# Host and paths of streamer deployment
-LOCAL_DIR = "/Users/xianran/Code/TX1/streamer/build"
-LOCAL_HOST_DIR = "localhost:/Users/xianran/Code/TX1/streamer/build"
-NUC_HOST_DIR = "sc02:/home/rxian/tx1dnn-caffe-opencl-gen9/build"
-TEGRA_HOST_DIR = "tegra-1:/home/ubuntu/Code/streamer/build"
-
 # Plot configurations
 OPT_FONT_NAME = 'Helvetica'
 OPT_GRAPH_HEIGHT = 150
@@ -84,6 +78,21 @@ SMALL_LEGEND_FP = FontProperties(
 YAXIS_TICKS = 3
 YAXIS_ROUND = 1000.0
 
+###### Configurations ######
+# Host and paths of streamer deployment
+LOCAL_DIR = "/Users/xianran/Code/TX1/streamer/build"
+LOCAL_HOST_DIR = "localhost:/Users/xianran/Code/TX1/streamer/build"
+NUC_HOST_DIR = "sc02:/home/rxian/tx1dnn-caffe-opencl-gen9/build"
+TEGRA_HOST_DIR = "tegra-1:/home/ubuntu/Code/streamer/build"
+TEGRA_BVLC_CAFFE_DIR = 'tegra-1:/home/ubuntu/Code/streamer-bvlc-caffe/build'
+TEGRA_FP16_CAFFE_DIR = 'tegra-1:/home/ubuntu/Code/streamer-fp16-caffe/build'
+TEGRA_MXNET_DIR = 'tegra-1:/home/ubuntu/Code/streamer-mxnet/build'
+TEGRA_TENSORRT_DIR = 'tegra-1:/home/ubuntu/Code/streamer-tensorrt/build'
+TEGRA_TENSORFLOW_DIR = 'tegra-1:/home/ubuntu/Code/streamer-tensorflow/build'
+NUC_MKL_CAFFE_DIR = 'sc02:/home/rxian/tx1dnn-intelcaffe-mkl-cpu/build'
+TEGRA_CONFIG_DIR = "/home/ubuntu/Code/config"
+NUC_CONFIG_DIR = "/home/rxian/config"
+
 END_TO_END_EXPERIMENT = 'endtoend'
 NNINFER_EXPERIMENT = 'nninfer'
 
@@ -97,6 +106,7 @@ DEFAULT_DEVICE_NUMBER = 0  # GPU #0
 DEFAULT_HOST_DIR = TEGRA_HOST_DIR
 DEFAULT_EXPERIMENT = END_TO_END_EXPERIMENT
 DEFAULT_STORE = False
+DEFAULT_CONFIG_DIR = './config'
 
 DEBUG = False
 
@@ -106,16 +116,49 @@ RESULT_DIR_BASE = 'results'
 HETER_DIR = RESULT_DIR_BASE + '/heter'
 HETER_EXP_ENCODERS = ['x264enc', 'omxh264enc', 'vaapih264enc']
 HETER_EXP_DECODERS = ['avdec_h264', 'omxh264dec', 'vaapidecode']
-HETER_FILE = "heter.tsv"
 HETER_EXP_HOST_DIRS = [NUC_HOST_DIR, TEGRA_HOST_DIR]
 HETER_FPS_KEYWORDS = ['classifier']
+HETER_FILE = "heter.tsv"
 
 # Imagenet experiment
 IMAGENET_DIR = RESULT_DIR_BASE + '/imagenet'
-IMAGENET_NETWORK_NAMES = [
+IMAGENET_EXP_NETWORK_NAMES = [
     'AlexNet', 'SqueezeNet', 'GoogleNet', 'VGG', 'ResNet', 'FCN']
-IMAGENET_FPS_KEYWORDS = ['processor']
+IMAGENET_EXP_FPS_KEYWORDS = ['processor']
 IMAGENET_FILE = "imagenet.tsv"
+
+# Framework experiment
+FRAMEWORK_DIR = RESULT_DIR_BASE + '/framework'
+FRAMEWORK_EXP_FRAMEWORKS = {
+    'caffe-bvlc': {
+        'host_dir': TEGRA_BVLC_CAFFE_DIR,
+        'config_dir': TEGRA_CONFIG_DIR,
+        'networks': ['AlexNet', 'GoogleNet', 'ResNet']
+    },
+    'mxnet': {
+        'host_dir': TEGRA_MXNET_DIR,
+        'config_dir': TEGRA_CONFIG_DIR,
+        'networks': ['InceptionBN', 'InceptionV3', 'ResNet-MXNet-50']
+    },
+    'tensorrt': {
+        'host_dir': TEGRA_TENSORRT_DIR,
+        'config_dir': TEGRA_CONFIG_DIR,
+        'networks': ['AlexNetGIE', 'GoogleNetGIE', 'ResNetGIE']
+    },
+    # 'tensorflow': {}
+    'caffe-fp16': {
+        'host_dir': TEGRA_FP16_CAFFE_DIR,
+        'config_dir': TEGRA_CONFIG_DIR,
+        'networks': ['AlexNetFP16', 'GoogleNetFP16']
+    },
+    'caffe-mkl': {
+        'host_dir': NUC_MKL_CAFFE_DIR,
+        'config_dir': NUC_CONFIG_DIR,
+        'networks': ['AlexNet', "GoogleNet"]
+    },
+}
+FRAMEWORK_FPS_KEYWORDS = ['processor']
+FRAMEWORK_FILE = 'framework.tsv'
 
 
 def print_error(msg):
@@ -160,7 +203,7 @@ def remote_execute(host_dir, *cmd):
 
 def build_streamer(host_dir):
   remote_execute(host_dir, "cmake ..")
-  remote_execute(host_dir, "make -j")
+  remote_execute(host_dir, "make -j8")
 
 
 def clean_dir(dir):
@@ -196,7 +239,8 @@ def run_experiment(host_dir,
                    device_number=DEFAULT_DEVICE_NUMBER,
                    duration=DEFAULT_DURATION,
                    experiment=DEFAULT_EXPERIMENT,
-                   store=DEFAULT_STORE):
+                   store=DEFAULT_STORE,
+                   config_dir=DEFAULT_CONFIG_DIR):
 
   def grab_fps(result, pattern):
     for line in result.split("\n"):
@@ -223,7 +267,8 @@ def run_experiment(host_dir,
                              "--encoder", encoder,
                              "--decoder", decoder,
                              "--device", str(device_number),
-                             "--store", str(store))
+                             "--store", str(store),
+                             "--config_dir", config_dir)
   collector.stop()
   results = []
   results.append(collector.get_cpu_usage())
@@ -283,15 +328,43 @@ def imagenet_eval():
 
   remote_execute(TEGRA_HOST_DIR, 'sleep 1')
 
-  for network in IMAGENET_NETWORK_NAMES:
+  for network in IMAGENET_EXP_NETWORK_NAMES:
     result_file = GET_RESULT_FILENAME([IMAGENET_DIR, network, IMAGENET_FILE])
     result = run_experiment(
         TEGRA_HOST_DIR,
         on_tegra=on_tegra,
         experiment=NNINFER_EXPERIMENT,
-        fps_keywords=IMAGENET_FPS_KEYWORDS,
+        fps_keywords=IMAGENET_EXP_FPS_KEYWORDS,
         network=network)
     write_result(result_file, result)
+
+
+def framework_eval():
+  clean_dir(FRAMEWORK_DIR)
+
+  for name in FRAMEWORK_EXP_FRAMEWORKS.keys():
+    framework = FRAMEWORK_EXP_FRAMEWORKS[name]
+    sync_codebase(framework['host_dir'])
+    build_streamer(framework['host_dir'])
+    remote_execute(framework['host_dir'], 'sleep 1')
+
+    on_nuc = 'mkl' in name
+    on_tegra = not on_nuc
+
+    for network in framework['networks']:
+      result_file = GET_RESULT_FILENAME(
+          [FRAMEWORK_DIR, name, network, FRAMEWORK_FILE])
+      result = run_experiment(
+          framework['host_dir'],
+          FRAMEWORK_FPS_KEYWORDS,
+          on_tegra=on_tegra,
+          on_nuc=on_nuc,
+          experiment=NNINFER_EXPERIMENT,
+          network=network,
+          duration=30,
+          config_dir=framework['config_dir'],
+          device_number=0 if on_tegra else -1)
+      write_result(result_file, result)
 
 ####### PLOT ########
 
@@ -338,6 +411,10 @@ def imagenet_plot():
   pass
 
 
+def framework_plot():
+  pass
+
+
 if __name__ == "__main__":
   parser = ArgumentParser("Evaluate performance of streamer")
   parser.add_argument(
@@ -345,9 +422,14 @@ if __name__ == "__main__":
   parser.add_argument(
       "--imagenet_eval", help="Run imagenet experiment", action='store_true')
   parser.add_argument(
+      "--framework_eval", help="Run multiple framework experiment", action='store_true')
+
+  parser.add_argument(
       "--heter_plot", help="Plot heterogeneous experiment", action='store_true')
   parser.add_argument(
       "--imagenet_plot", help="Plot imagenet experiment", action='store_true')
+  parser.add_argument(
+      "--framework_plot", help="Plot framework experiment", action='store_true')
   parser.add_argument(
       "--debug", help="Enable debugging", action='store_true')
 
@@ -362,8 +444,14 @@ if __name__ == "__main__":
   if args.imagenet_eval:
     imagenet_eval()
 
+  if args.framework_eval:
+    framework_eval()
+
   if args.heter_plot:
     heter_plot()
 
   if args.imagenet_plot:
     imagenet_plot()
+
+  if args.framework_plot:
+    framework_plot()

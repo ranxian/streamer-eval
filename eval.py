@@ -99,7 +99,7 @@ NNINFER_EXPERIMENT = 'nninfer'
 # Default values
 DEFAULT_NETWORK = "GoogleNet"
 DEFAULT_CAMERA = "AMCBLACK1"
-DEFAULT_DURATION = 60
+DEFAULT_DURATION = 120
 DEFAULT_ENCODER = 'omxh264enc'
 DEFAULT_DECODER = 'omxh264dec'
 DEFAULT_DEVICE_NUMBER = 0  # GPU #0
@@ -107,17 +107,18 @@ DEFAULT_HOST_DIR = TEGRA_HOST_DIR
 DEFAULT_EXPERIMENT = END_TO_END_EXPERIMENT
 DEFAULT_STORE = False
 DEFAULT_CONFIG_DIR = './config'
+DEFAULT_BATCH_SIZE = 1
+DEFAULT_USE_FP16 = False
 
 DEBUG = False
 
 RESULT_DIR_BASE = 'results'
-
 # Heter experiment
-HETER_DIR = RESULT_DIR_BASE + '/heter'
+HETER_DIR = RESULT_DIR_BASE + '/heterogeneous'
 HETER_EXP_ENCODERS = ['x264enc', 'omxh264enc', 'vaapih264enc']
 HETER_EXP_DECODERS = ['avdec_h264', 'omxh264dec', 'vaapidecode']
 HETER_EXP_HOST_DIRS = [NUC_HOST_DIR, TEGRA_HOST_DIR]
-HETER_FPS_KEYWORDS = ['classifier']
+HETER_EXP_FPS_KEYWORDS = ['classifier']
 HETER_FILE = "heter.tsv"
 
 # Imagenet experiment
@@ -129,6 +130,7 @@ IMAGENET_FILE = "imagenet.tsv"
 
 # Framework experiment
 FRAMEWORK_DIR = RESULT_DIR_BASE + '/framework'
+FRAME_WORK_EXP_BATCH_SIZES = [1, 2, 4, 8]
 FRAMEWORK_EXP_FRAMEWORKS = {
     'caffe-bvlc': {
         'host_dir': TEGRA_BVLC_CAFFE_DIR,
@@ -140,16 +142,21 @@ FRAMEWORK_EXP_FRAMEWORKS = {
         'config_dir': TEGRA_CONFIG_DIR,
         'networks': ['InceptionBN', 'InceptionV3', 'ResNet-MXNet-50']
     },
+    'tensorrt-fp16': {
+        'host_dir': TEGRA_TENSORRT_DIR,
+        'config_dir': TEGRA_CONFIG_DIR,
+        'networks': ['AlexNetGIE', 'GoogleNetGIE']
+    },
     'tensorrt': {
         'host_dir': TEGRA_TENSORRT_DIR,
         'config_dir': TEGRA_CONFIG_DIR,
         'networks': ['AlexNetGIE', 'GoogleNetGIE', 'ResNetGIE']
     },
-    # 'tensorflow': {}
+    # # 'tensorflow': {}
     'caffe-fp16': {
         'host_dir': TEGRA_FP16_CAFFE_DIR,
         'config_dir': TEGRA_CONFIG_DIR,
-        'networks': ['AlexNetFP16', 'GoogleNetFP16']
+        'networks': ['AlexNetFP16', 'GoogleNetFP16'],  # 'SqueezeNet1.0FP16']
     },
     'caffe-mkl': {
         'host_dir': NUC_MKL_CAFFE_DIR,
@@ -157,8 +164,16 @@ FRAMEWORK_EXP_FRAMEWORKS = {
         'networks': ['AlexNet', "GoogleNet"]
     },
 }
-FRAMEWORK_FPS_KEYWORDS = ['processor']
+FRAMEWORK_EXP_FPS_KEYWORDS = ['processor']
 FRAMEWORK_FILE = 'framework.tsv'
+
+# Scalability experiment
+SCALABILITY_DIR = RESULT_DIR_BASE + '/scalability'
+SCALABILITY_EXP_FPS_KEYWORDS = ['classifier']
+SCALABILITY_EXP_BATCH_SIZES = [1, 2, 4, 7]
+SCALABILITY_EXP_CAMERA_BASENAME = 'AMCBLACK'
+SCALABILITY_EXP_NETWORKS = ['AlexNet', 'GoogleNet']
+SCALABILITY_FILE = 'scalability.tsv'
 
 
 def print_error(msg):
@@ -224,8 +239,11 @@ def write_result(filename, metrics):
 
 
 def read_result(filename):
+  results = []
   with open(filename, 'r') as f:
-    return f.readline().strip().split("\t")
+    for line in f:
+      results.append(line.strip().split("\t"))
+  return results
 
 
 def run_experiment(host_dir,
@@ -240,7 +258,9 @@ def run_experiment(host_dir,
                    duration=DEFAULT_DURATION,
                    experiment=DEFAULT_EXPERIMENT,
                    store=DEFAULT_STORE,
-                   config_dir=DEFAULT_CONFIG_DIR):
+                   config_dir=DEFAULT_CONFIG_DIR,
+                   batch=DEFAULT_BATCH_SIZE,
+                   use_fp16=DEFAULT_USE_FP16):
 
   def grab_fps(result, pattern):
     for line in result.split("\n"):
@@ -268,7 +288,9 @@ def run_experiment(host_dir,
                              "--decoder", decoder,
                              "--device", str(device_number),
                              "--store", str(store),
-                             "--config_dir", config_dir)
+                             "--config_dir", config_dir,
+                             "--batch", str(batch),
+                             "--fp16", str(use_fp16))
   collector.stop()
   results = []
   results.append(collector.get_cpu_usage())
@@ -313,7 +335,7 @@ def heter_eval():
             decoder=decoder,
             device_number=device,
             store=True,
-            fps_keywords=HETER_FPS_KEYWORDS)
+            fps_keywords=HETER_EXP_FPS_KEYWORDS)
         write_result(result_file, result)
 
 
@@ -350,20 +372,56 @@ def framework_eval():
 
     on_nuc = 'mkl' in name
     on_tegra = not on_nuc
+    use_fp16 = "fp16" in name
 
     for network in framework['networks']:
+      for batch_size in FRAME_WORK_EXP_BATCH_SIZES:
+        result_file = GET_RESULT_FILENAME(
+            [FRAMEWORK_DIR, name, network, FRAMEWORK_FILE])
+        result = run_experiment(
+            framework['host_dir'],
+            FRAMEWORK_EXP_FPS_KEYWORDS,
+            on_tegra=on_tegra,
+            on_nuc=on_nuc,
+            experiment=NNINFER_EXPERIMENT,
+            network=network,
+            config_dir=framework['config_dir'],
+            device_number=0 if on_tegra else -1,
+            batch=batch_size,
+            use_fp16=use_fp16)
+        write_result(result_file, result)
+
+
+def scalability_eval():
+  clean_dir(SCALABILITY_DIR)
+
+  sync_codebase(TEGRA_HOST_DIR)
+  build_streamer(TEGRA_HOST_DIR)
+  remote_execute(TEGRA_HOST_DIR, 'sleep 1')
+
+  on_tegra = True
+
+  def get_camera_names(batch_size):
+    camera_names = []
+    for i in xrange(1, batch_size+1):
+      camera_name = SCALABILITY_EXP_CAMERA_BASENAME + str(i)
+      camera_names.append(camera_name)
+    return ','.join(camera_names)
+
+  for network in SCALABILITY_EXP_NETWORKS:
+    for batch_size in SCALABILITY_EXP_BATCH_SIZES:
+      camera_names = get_camera_names(batch_size)
       result_file = GET_RESULT_FILENAME(
-          [FRAMEWORK_DIR, name, network, FRAMEWORK_FILE])
-      result = run_experiment(
-          framework['host_dir'],
-          FRAMEWORK_FPS_KEYWORDS,
-          on_tegra=on_tegra,
-          on_nuc=on_nuc,
-          experiment=NNINFER_EXPERIMENT,
-          network=network,
-          duration=30,
-          config_dir=framework['config_dir'],
-          device_number=0 if on_tegra else -1)
+          [SCALABILITY_DIR, network, SCALABILITY_FILE])
+      result = run_experiment(TEGRA_HOST_DIR,
+                              SCALABILITY_EXP_FPS_KEYWORDS,
+                              on_tegra=on_tegra,
+                              experiment=END_TO_END_EXPERIMENT,
+                              network=network,
+                              config_dir=TEGRA_CONFIG_DIR,
+                              camera=camera_names,
+                              batch=batch_size,
+                              store=True)
       write_result(result_file, result)
 
 ####### PLOT ########
@@ -396,23 +454,75 @@ def saveGraph(fig, output, width, height):
   print "Saved graph to " + output
 
 
+def MEM_STR(mem):
+  return "%.2f MB" % (float(mem)/1024.0)
+
+
 def heter_plot():
+  HEADERS = ['PLATFORM', 'DEVICE', 'CODECS', 'CPU', 'MEM', 'FPS']
+  print '\t'.join(HEADERS)
   for platform in ['nuc', 'tegra']:
     for backend in ['cpu', 'gpu']:
-      for enc_dec in ['software', 'hardware']:
+      for enc_dec in ['sde', 'hde']:
+        codecs = 'software' if enc_dec == 'sde' else 'hardware'
         result = read_result(GET_RESULT_FILENAME([HETER_DIR,
                                                   platform,
                                                   backend+"-"+enc_dec,
-                                                  HETER_FILE]))
-        print platform, backend, enc_dec, result
+                                                  HETER_FILE]))[0]
+        result[1] = MEM_STR(result[1])
+        print '\t'.join([platform, backend, codecs, '\t'.join(result)])
 
 
 def imagenet_plot():
-  pass
+  HEADERS = ['NETWORK', 'CPU', 'MEM', 'FPS']
+  print '\t'.join(HEADERS)
+  for network in IMAGENET_EXP_NETWORK_NAMES:
+    result = read_result(
+        GET_RESULT_FILENAME([IMAGENET_DIR, network, IMAGENET_FILE]))[0]
+    result[1] = MEM_STR(result[1])
+    print '\t'.join([network, '\t'.join(result)])
 
 
 def framework_plot():
-  pass
+  HEADERS = ['FRAMEWORK', 'NETWORK', 'BATCH', 'CPU', 'MEM', 'FPS']
+  print '\t'.join(HEADERS)
+  for name in FRAMEWORK_EXP_FRAMEWORKS.keys():
+    framework = FRAMEWORK_EXP_FRAMEWORKS[name]
+    for network in framework['networks']:
+      results = read_result(
+          GET_RESULT_FILENAME([FRAMEWORK_DIR, name, network, FRAMEWORK_FILE]))
+      for result, batch_size in zip(results, [1, 2, 4, 8]):
+        result[1] = MEM_STR(result[1])
+        result[2] = str(float(result[2]) * batch_size)
+        print '\t'.join([name, network, str(batch_size), '\t'.join(result)])
+    print ''
+
+
+def scalability_plot():
+  HEADERS = ['NETWORK', 'BATCH', 'CPU', 'MEM', 'FPS']
+  print '\t'.join(HEADERS)
+
+  for network in SCALABILITY_EXP_NETWORKS:
+    results = read_result(
+        GET_RESULT_FILENAME([SCALABILITY_DIR, network, SCALABILITY_FILE]))
+    for result, batch_size in zip(results, [1, 2, 4, 8]):
+      result[1] = MEM_STR(result[1])
+      result[2] = str(float(result[2]) * batch_size)
+      print '\t'.join([network, str(batch_size), '\t'.join(result)])
+
+
+def print_summary():
+  print 'HETEROGENEOUS EXPERIMENT'
+  heter_plot()
+  print ''
+  print 'IMAGENET EXPERIMENT'
+  imagenet_plot()
+  print ''
+  print 'FRAMEWORK EXPERIMENT'
+  framework_plot()
+  print ''
+  print 'SCALABILITY EXPERIMENT'
+  scalability_plot()
 
 
 if __name__ == "__main__":
@@ -423,6 +533,8 @@ if __name__ == "__main__":
       "--imagenet_eval", help="Run imagenet experiment", action='store_true')
   parser.add_argument(
       "--framework_eval", help="Run multiple framework experiment", action='store_true')
+  parser.add_argument(
+      "--scalability_eval", help="Run scalability experiment", action='store_true')
 
   parser.add_argument(
       "--heter_plot", help="Plot heterogeneous experiment", action='store_true')
@@ -430,6 +542,10 @@ if __name__ == "__main__":
       "--imagenet_plot", help="Plot imagenet experiment", action='store_true')
   parser.add_argument(
       "--framework_plot", help="Plot framework experiment", action='store_true')
+  parser.add_argument(
+      "--scalability_plot", help="Plot scalability experiment", action='store_true')
+  parser.add_argument(
+      "--summary", help="Print result summary", action='store_true')
   parser.add_argument(
       "--debug", help="Enable debugging", action='store_true')
 
@@ -447,6 +563,9 @@ if __name__ == "__main__":
   if args.framework_eval:
     framework_eval()
 
+  if args.scalability_eval:
+    scalability_eval()
+
   if args.heter_plot:
     heter_plot()
 
@@ -455,3 +574,9 @@ if __name__ == "__main__":
 
   if args.framework_plot:
     framework_plot()
+
+  if args.scalability_plot:
+    scalability_plot()
+
+  if args.summary:
+    print_summary()

@@ -93,6 +93,17 @@ NUC_MKL_CAFFE_DIR = 'sc02:/home/rxian/tx1dnn-intelcaffe-mkl-cpu/build'
 TEGRA_CONFIG_DIR = "/home/ubuntu/Code/config"
 NUC_CONFIG_DIR = "/home/rxian/config"
 
+HOST_DIC = {
+    "local": LOCAL_HOST_DIR,
+    "nuc": NUC_HOST_DIR,
+    "tegra": TEGRA_HOST_DIR,
+    "tegra-bvlc": TEGRA_BVLC_CAFFE_DIR,
+    "tegra-fp16": TEGRA_FP16_CAFFE_DIR,
+    "tegra-mxnet": TEGRA_MXNET_DIR,
+    "tegra-gie": TEGRA_TENSORRT_DIR,
+    "nuc-mkl": NUC_MKL_CAFFE_DIR,
+}
+
 END_TO_END_EXPERIMENT = 'endtoend'
 NNINFER_EXPERIMENT = 'nninfer'
 
@@ -182,7 +193,7 @@ def print_error(msg):
 
 
 def sync_codebase(host_dir):
-  ssh_command = "rsync -avh --delete --exclude=.git/* --exclude=build/* --exclude=.idea/* --exclude=config/* %s/.. %s/.." % (
+  ssh_command = "rsync -avh --delete --exclude=.git/* --exclude=build/* --exclude=.idea/* --exclude=./config/* %s/.. %s/.." % (
       LOCAL_DIR, host_dir)
   if not DEBUG:
     ssh_command += " > /dev/null"
@@ -511,6 +522,13 @@ def scalability_plot():
       print '\t'.join([network, str(batch_size), '\t'.join(result)])
 
 
+def sync_streamer(host_name):
+  """Sync and build streamer on a remote machine"""
+  host_dir = HOST_DIC[host_name]
+  sync_codebase(host_dir)
+  build_streamer(host_dir)
+
+
 def print_summary():
   print 'HETEROGENEOUS EXPERIMENT'
   heter_plot()
@@ -535,6 +553,8 @@ if __name__ == "__main__":
       "--framework_eval", help="Run multiple framework experiment", action='store_true')
   parser.add_argument(
       "--scalability_eval", help="Run scalability experiment", action='store_true')
+  parser.add_argument(
+      "--sync", help="Sync the codebase with a remote host: nuc, nuc-mkl, tegra, tegra-fp16-caffe, tegra-gie, tegra-mxnet")
 
   parser.add_argument(
       "--heter_plot", help="Plot heterogeneous experiment", action='store_true')
@@ -580,3 +600,6 @@ if __name__ == "__main__":
 
   if args.summary:
     print_summary()
+
+  if args.sync:
+    sync_streamer(args.sync)
